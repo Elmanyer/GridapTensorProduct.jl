@@ -1,0 +1,8 @@
+println("Running GridapTensorProduct test scripts")
+include("TensorProductQuadraturesTests.jl")
+include("TensorProductFESpaceInterfaceTests.jl")
+include("DOFOrderingTests.jl")
+include("FEFunctionTests.jl")
+include("KroneckerAssemblerTests.jl")
+include("PoissonEquivalenceTests.jl")
+println("GridapTensorProduct test scripts completed")
