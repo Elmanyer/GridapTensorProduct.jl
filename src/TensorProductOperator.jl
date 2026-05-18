@@ -130,8 +130,8 @@ A = get_global_matrix(op)  # Triggers Kronecker assembly
 """
 function TensorProductOperator(
     operator_type::Symbol,
-    spaces::NTuple{N, TestFESpace},
-    measures::NTuple{N, Measure};
+    spaces::NTuple{N},
+    measures::NTuple{N};
     b_coeffs::Union{NTuple, Nothing}=nothing
 ) where {N}
 
@@ -141,8 +141,7 @@ function TensorProductOperator(
 
     # Validate inputs
     @assert !isempty(spaces) "Need at least one space"
-    @assert all(s -> s isa Gridap.FESpaces.TestFESpace, spaces) "All spaces must be TestFESpace"
-    @assert all(m -> m isa Gridap.CellData.Measure, measures) "All measures must be Gridap Measure"
+    @assert all(s -> s isa Gridap.FESpaces.FESpace, spaces) "All spaces must be FESpace instances"
     @assert length(spaces) == length(measures) "Number of spaces and measures must match"
 
     # Stage 4.1: Extract all subdomain operators (M, K, G, D, A)

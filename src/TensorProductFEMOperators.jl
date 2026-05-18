@@ -181,8 +181,8 @@ Key points:
   - Handles variable number of subdomains N automatically
 """
 function assemble_subdomain_operators(
-    spaces::NTuple{N, TestFESpace},
-    measures::NTuple{N, Measure};
+    spaces::NTuple{N},
+    measures::NTuple{N};
     b_coeffs::Union{NTuple, Nothing}=nothing
 ) where N
 
@@ -209,13 +209,11 @@ function assemble_subdomain_operators(
             (v) -> ∫(0*v) * dΩk,
             Uk, Vk)))
 
-        # Gradient, derivative, and advection matrices for 1D subdomain.
-        # Each subdomain is 1D, so ∇(u) is VectorValue{1} — always use direction=1.
-        G_ops[k] = Matrix(extract_gradient_matrix(Uk, Vk, dΩk; direction=1))
-        D_ops[k] = Matrix(extract_derivative_matrix(Uk, Vk, dΩk; direction=1))
+        G_ops[k] = Matrix(extract_gradient_matrix(Uk, Vk, dΩk))
+        D_ops[k] = Matrix(extract_derivative_matrix(Uk, Vk, dΩk))
 
         b_k = (b_coeffs !== nothing && k <= length(b_coeffs)) ? b_coeffs[k] : 1.0
-        A_ops[k] = Matrix(extract_advection_matrix(Uk, Vk, dΩk, b_k; direction=1))
+        A_ops[k] = Matrix(extract_advection_matrix(Uk, Vk, dΩk, b_k))
     end
 
     return TensorProductSubdomainOperators{N}(
@@ -503,22 +501,16 @@ Parameters:
 
 Returns: Sparse matrix of size (n_dofs, n_dofs)
 """
-function extract_gradient_matrix(
-    U::FESpace,
-    V::FESpace,
-    measure::Measure;
-    direction::Int=1
-)
-    # Assemble weak form: ∫ (∂u/∂x_direction) v dx
-    # Use indexed access to gradient component
+function extract_gradient_matrix(U::FESpace, V::FESpace, measure::Measure)
+    # Each subdomain is 1D: ∇(u) is VectorValue{1}. Dot product with the 1D unit
+    # vector extracts ∂u/∂x as a scalar (direct indexing ∇(u)[1] fails in Gridap's
+    # symbolic framework because getindex is not defined on SingleFieldFEBasis).
     op_grad = AffineFEOperator(
-        (u, v) -> ∫( ∇(u)[direction] * v ) * measure,
+        (u, v) -> ∫( (∇(u) ⋅ VectorValue(1.0)) * v ) * measure,
         (v) -> ∫(0*v) * measure,
         U, V
     )
-
-    G = get_matrix(op_grad)
-    return G
+    return get_matrix(op_grad)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -552,23 +544,13 @@ Returns: Matrix of size (n_dofs, n_dofs)
 
 Supports: Arbitrary N-dimensional domains (tested up to 3D)
 """
-function extract_derivative_matrix(
-    U::FESpace,
-    V::FESpace,
-    measure::Measure;
-    direction::Int=1
-)
-    # Generic implementation supporting arbitrary directions
-    # Assemble: ∫ (∂u/∂x_direction) v dx
-
+function extract_derivative_matrix(U::FESpace, V::FESpace, measure::Measure)
     op_deriv = AffineFEOperator(
-        (u, v) -> ∫( ∇(u)[direction] * v ) * measure,
+        (u, v) -> ∫( (∇(u) ⋅ VectorValue(1.0)) * v ) * measure,
         (v) -> ∫(0*v) * measure,
         U, V
     )
-
-    D = get_matrix(op_deriv)
-    return D
+    return get_matrix(op_deriv)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -610,22 +592,13 @@ A_x = extract_advection_matrix(Ux, Vx, dΩx, 2.0, direction=1)  # b_x = 2.0
 Note: For time-dependent advection, scale coefficient appropriately for your formulation.
 """
 function extract_advection_matrix(
-    U::FESpace,
-    V::FESpace,
-    measure::Measure,
-    b_coefficient::Real;
-    direction::Int=1
+    U::FESpace, V::FESpace, measure::Measure, b_coefficient::Real
 )
-    # Assemble: ∫ v (b · ∂u/∂x_direction) dx
-    # For scalar b and direction d: ∫ v (b * ∂u/∂x_d) dx_d
-
     op_advec = AffineFEOperator(
-        (u, v) -> ∫( v * b_coefficient * ∇(u)[direction] ) * measure,
+        (u, v) -> ∫( v * b_coefficient * (∇(u) ⋅ VectorValue(1.0)) ) * measure,
         (v) -> ∫(0*v) * measure,
         U, V
     )
-
-    A = get_matrix(op_advec)
-    return A
+    return get_matrix(op_advec)
 end
 
