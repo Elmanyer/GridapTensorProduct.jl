@@ -85,6 +85,38 @@ end
 
 export TensorProductIntegrand
 
+# ═══════════════════════════════════════════════════════════════════════════
+# TensorProductFormContribution — list of terms captured from a 2-arg form
+# ═══════════════════════════════════════════════════════════════════════════
+
+"""
+    struct TensorProductFormContribution
+
+A list of individually-captured `TensorProductIntegrand` terms produced when
+`+` is called between `TensorProductIntegrand` objects. This ensures that a
+multi-term weak form written as:
+
+    a(u, v) = ∫(∇u⋅∇v)*dΩ_tp + ∫(u*v)*dΩ_tp
+
+keeps the two terms *separate* rather than merging them (as Gridap's
+`DomainContribution +` would do). Each term can then be individually
+classified and assembled via the Kronecker heuristic in `translate_bilinear_form`.
+"""
+struct TensorProductFormContribution
+    terms::Vector{TensorProductIntegrand}
+end
+
+export TensorProductFormContribution
+
+Base.:+(t1::TensorProductIntegrand, t2::TensorProductIntegrand) =
+    TensorProductFormContribution([t1, t2])
+Base.:+(fc::TensorProductFormContribution, t::TensorProductIntegrand) =
+    TensorProductFormContribution([fc.terms..., t])
+Base.:+(t::TensorProductIntegrand, fc::TensorProductFormContribution) =
+    TensorProductFormContribution([t, fc.terms...])
+Base.:+(fc1::TensorProductFormContribution, fc2::TensorProductFormContribution) =
+    TensorProductFormContribution([fc1.terms..., fc2.terms...])
+
 # ===========================
 # TensorProductDomainContribution — per-subdomain contribution container
 # ===========================

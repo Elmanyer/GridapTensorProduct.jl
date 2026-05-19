@@ -140,45 +140,39 @@ get_cell_ids(f::TensorProductFESpace, ttrian) = get_tensor_cell_ids(f)
 
 function get_tensor_cell_dof_ids(f::TensorProductFESpace)
     N = length(f.spaces)
-    nf = ntuple(k -> num_free_dofs(f.spaces[k]), N)
+    # Extract the cell_dof_ids for each subdomain space
     sub_cell_dofs = ntuple(k -> Gridap.FESpaces.get_cell_dof_ids(f.spaces[k]), N)
     ncells_per_dim = ntuple(k -> length(sub_cell_dofs[k]), N)
+    total_cells = prod(ncells_per_dim)
 
-    rows = Vector{Vector{Int32}}()
-    sizehint!(rows, prod(ncells_per_dim))
+    # 1. Pointers array: maps cell_id to the start of its DoFs in the data vector
+    ptrs = Vector{Int32}(undef, total_cells + 1)
+    ptrs[1] = 1
 
-    for cell_idx in CartesianIndices(ncells_per_dim)
-        local_dofs = ntuple(k -> sub_cell_dofs[k][cell_idx[k]], N)
-        local_sizes = ntuple(k -> length(local_dofs[k]), N)
-        cell_row = Int32[]
+    # Calculate how many DoFs are in one tensor cell
+    local_sizes_per_dim = ntuple(k -> length(sub_cell_dofs[k][1]), N)
+    dofs_per_cell = prod(local_sizes_per_dim)
 
-        for dof_idx in CartesianIndices(local_sizes)
-            dofs = ntuple(k -> Int32(local_dofs[k][dof_idx[k]]), N)
-            is_free = all(d -> d > 0, dofs)
-            if is_free
-                lin = Int32(dofs[1])
-                stride = nf[1]
-                for k in 2:N
-                    lin   += Int32((dofs[k] - 1) * stride)
-                    stride *= nf[k]
-                end
-                push!(cell_row, lin)
-            else
-                abs_dofs = ntuple(k -> Int32(abs(dofs[k])), N)
-                n_range  = ntuple(k -> (dofs[k] < 0 ?
-                    Gridap.FESpaces.num_dirichlet_dofs(f.spaces[k]) : nf[k]), N)
-                lin = Int32(abs_dofs[1])
-                stride = n_range[1]
-                for k in 2:N
-                    lin   += Int32((abs_dofs[k] - 1) * stride)
-                    stride *= n_range[k]
-                end
-                push!(cell_row, -lin)
-            end
-        end
-        push!(rows, cell_row)
+    for i in 1:total_cells
+        ptrs[i+1] = ptrs[i] + dofs_per_cell
     end
-    return Table(rows)
+
+    # 2. Data array: Each element is a Vector{Int32} representing one DoF's multi-index
+    # We use Vector{Int32} here specifically to match your [[1,1], ...] requirement
+    data = Vector{Vector{Int32}}()
+    sizehint!(data, total_cells * dofs_per_cell)
+
+    # Loop over the tensor-product cells
+    for cell_idx in CartesianIndices(ncells_per_dim)
+        # Get the subdomain DoF IDs for the current cell
+        local_sub_dofs = ntuple(k -> sub_cell_dofs[k][cell_idx[k]], N)
+        local_sizes = ntuple(k -> length(local_sub_dofs[k]), N)
+        for dof_idx in CartesianIndices(local_sizes)
+            dof_vector = Int32[local_sub_dofs[k][dof_idx[k]] for k in 1:N]
+            push!(data, dof_vector)
+        end
+    end
+    return Table(data, ptrs)
 end
 
 get_cell_dof_ids(f::TensorProductFESpace) = get_tensor_cell_dof_ids(f)

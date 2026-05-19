@@ -7,8 +7,7 @@ Kronecker product decomposition of weak forms.
 # Purpose
 
 This module translates global weak-form operators on tensor-product domains Ω = Ω₁ ⊗ Ω₂ ⊗ ... ⊗ Ωₙ
-into factored Kronecker products of subdomain operators. This translation is **Stage 4** of the
-tensor product assembly pipeline.
+into factored Kronecker products of subdomain operators. 
 
 # Six Global Operators Supported
 
@@ -132,29 +131,108 @@ export assemble_advection_tensor
 """
     TensorProductSubdomainOperators{N}
 
-Collection of fundamental subdomain operators for Ω_k (k = 1, ..., N).
+Lazy container for fundamental subdomain operators Ω_k (k = 1, ..., N).
 
-Fields:
-  - `spaces::NTuple{N, FESpace}` - trial/test spaces on each subdomain
-  - `measures::NTuple{N, Measure}` - quadrature measures for integration
-  - `M_ops::NTuple{N, SparseMatrixCSC}` - mass matrices M^(k)
-  - `K_ops::NTuple{N, SparseMatrixCSC}` - stiffness matrices K^(k)
-  - `G_ops::NTuple{N, Matrix}` - gradient matrices G^(k) (rectangular)
-  - `D_ops::NTuple{N, Matrix}` - directional derivative matrices D^(k)
-  - `A_ops::NTuple{N, SparseMatrixCSC}` - advection matrices A^(k)
+Each of the five per-subdomain matrix types (M, K, G, D, A) is computed on first
+access and cached. Operators never needed by the weak form are never assembled.
+
+# Fields (public, accessed via property syntax)
+- `spaces`   — N test FE spaces
+- `measures` — N integration measures
+- `M_ops`    — mass matrices M^(k): `∫ φᵢφⱼ dxₖ` (assembled on first access)
+- `K_ops`    — stiffness matrices K^(k): `∫ ∇φᵢ·∇φⱼ dxₖ`
+- `G_ops`    — gradient matrices G^(k): `∫ (∂φᵢ/∂xₖ) φⱼ dxₖ`
+- `D_ops`    — derivative matrices D^(k) (same form as G; used in curl-curl)
+- `A_ops`    — advection matrices A^(k) (requires `b_coeffs` at construction)
+
+Access `ops.M_ops`, `ops.K_ops`, etc. as before; the matrices are assembled on
+demand and results are cached for subsequent calls.
 """
-struct TensorProductSubdomainOperators{N}
+mutable struct TensorProductSubdomainOperators{N}
     spaces::NTuple{N, FESpace}
     measures::NTuple{N, Measure}
-    M_ops::NTuple{N, Matrix}  # Mass matrices
-    K_ops::NTuple{N, Matrix}  # Stiffness matrices (= G^T G if factored)
-    G_ops::NTuple{N, Matrix}  # Gradient matrices (rectangular)
-    D_ops::NTuple{N, Matrix}  # Directional derivatives
-    A_ops::NTuple{N, Matrix}  # Advection matrices
+    b_coeffs::Union{NTuple, Nothing}          # advection coefficients (for lazy A)
+    _M_ops::Vector{Union{Matrix, Nothing}}    # cache: nothing = not yet assembled
+    _K_ops::Vector{Union{Matrix, Nothing}}
+    _G_ops::Vector{Union{Matrix, Nothing}}
+    _D_ops::Vector{Union{Matrix, Nothing}}
+    _A_ops::Vector{Union{Matrix, Nothing}}
+end
+
+# ── Lazy accessor internals ───────────────────────────────────────────────────
+
+function _assemble_M_k!(ops::TensorProductSubdomainOperators, k::Int)
+    Uk = TrialFESpace(ops.spaces[k])
+    ops._M_ops[k] = Matrix(get_matrix(AffineFEOperator(
+        (u, v) -> ∫(u * v) * ops.measures[k],
+        (v)    -> ∫(0 * v) * ops.measures[k],
+        Uk, ops.spaces[k])))
+end
+
+function _assemble_K_k!(ops::TensorProductSubdomainOperators, k::Int)
+    Uk = TrialFESpace(ops.spaces[k])
+    ops._K_ops[k] = Matrix(get_matrix(AffineFEOperator(
+        (u, v) -> ∫(∇(u) ⋅ ∇(v)) * ops.measures[k],
+        (v)    -> ∫(0 * v) * ops.measures[k],
+        Uk, ops.spaces[k])))
+end
+
+function _assemble_G_k!(ops::TensorProductSubdomainOperators, k::Int)
+    Uk = TrialFESpace(ops.spaces[k])
+    ops._G_ops[k] = Matrix(extract_gradient_matrix(Uk, ops.spaces[k], ops.measures[k]))
+end
+
+function _assemble_D_k!(ops::TensorProductSubdomainOperators, k::Int)
+    Uk = TrialFESpace(ops.spaces[k])
+    ops._D_ops[k] = Matrix(extract_derivative_matrix(Uk, ops.spaces[k], ops.measures[k]))
+end
+
+function _assemble_A_k!(ops::TensorProductSubdomainOperators, k::Int)
+    Uk = TrialFESpace(ops.spaces[k])
+    b_k = (ops.b_coeffs !== nothing && k <= length(ops.b_coeffs)) ?
+          ops.b_coeffs[k] : 1.0
+    ops._A_ops[k] = Matrix(extract_advection_matrix(
+        Uk, ops.spaces[k], ops.measures[k], b_k))
+end
+
+function _get_all!(cache::Vector{Union{Matrix,Nothing}}, assemble_k!::Function,
+                   ops::TensorProductSubdomainOperators{N}) where N
+    for k in 1:N
+        cache[k] === nothing && assemble_k!(ops, k)
+    end
+    return NTuple{N, Matrix}(cache)
+end
+
+# ── Public accessors (triggered by Base.getproperty) ─────────────────────────
+
+_get_M_ops!(ops::TensorProductSubdomainOperators) =
+    _get_all!(ops._M_ops, _assemble_M_k!, ops)
+
+_get_K_ops!(ops::TensorProductSubdomainOperators) =
+    _get_all!(ops._K_ops, _assemble_K_k!, ops)
+
+_get_G_ops!(ops::TensorProductSubdomainOperators) =
+    _get_all!(ops._G_ops, _assemble_G_k!, ops)
+
+_get_D_ops!(ops::TensorProductSubdomainOperators) =
+    _get_all!(ops._D_ops, _assemble_D_k!, ops)
+
+_get_A_ops!(ops::TensorProductSubdomainOperators) =
+    _get_all!(ops._A_ops, _assemble_A_k!, ops)
+
+# ── Transparent property access — backward compatible ──────────────────────
+
+function Base.getproperty(ops::TensorProductSubdomainOperators, s::Symbol)
+    s === :M_ops && return _get_M_ops!(ops)
+    s === :K_ops && return _get_K_ops!(ops)
+    s === :G_ops && return _get_G_ops!(ops)
+    s === :D_ops && return _get_D_ops!(ops)
+    s === :A_ops && return _get_A_ops!(ops)
+    return getfield(ops, s)
 end
 
 """
-    assemble_subdomain_operators(spaces::NTuple, measures::NTuple;
+    assemble_subdomain_operators(spaces::NTuple{N, FESpace}, measures::NTuple{N, Measure};
                                 b_coeffs::Union{NTuple,Nothing}=nothing,
                                 velocity_direction::Int=1) -> TensorProductSubdomainOperators
 
@@ -181,50 +259,14 @@ Key points:
   - Handles variable number of subdomains N automatically
 """
 function assemble_subdomain_operators(
-    spaces::NTuple{N},
-    measures::NTuple{N};
+    spaces::NTuple{N, FESpace},
+    measures::NTuple{N, Measure};
     b_coeffs::Union{NTuple, Nothing}=nothing
 ) where N
-
-    M_ops = Vector{Matrix}(undef, N)
-    K_ops = Vector{Matrix}(undef, N)
-    G_ops = Vector{Matrix}(undef, N)
-    D_ops = Vector{Matrix}(undef, N)
-    A_ops = Vector{Matrix}(undef, N)
-
-    for k in 1:N
-        Uk = TrialFESpace(spaces[k])
-        Vk = spaces[k]
-        dΩk = measures[k]
-
-        # Mass matrix: ∫ u v dΩ_k
-        M_ops[k] = Matrix(get_matrix(AffineFEOperator(
-            (u, v) -> ∫(u*v) * dΩk,
-            (v) -> ∫(0*v) * dΩk,
-            Uk, Vk)))
-
-        # Stiffness matrix: ∫ ∇u·∇v dΩ_k
-        K_ops[k] = Matrix(get_matrix(AffineFEOperator(
-            (u, v) -> ∫(∇(u)⋅∇(v)) * dΩk,
-            (v) -> ∫(0*v) * dΩk,
-            Uk, Vk)))
-
-        G_ops[k] = Matrix(extract_gradient_matrix(Uk, Vk, dΩk))
-        D_ops[k] = Matrix(extract_derivative_matrix(Uk, Vk, dΩk))
-
-        b_k = (b_coeffs !== nothing && k <= length(b_coeffs)) ? b_coeffs[k] : 1.0
-        A_ops[k] = Matrix(extract_advection_matrix(Uk, Vk, dΩk, b_k))
-    end
-
+    noth() = Vector{Union{Matrix, Nothing}}(fill(nothing, N))
     return TensorProductSubdomainOperators{N}(
-        spaces,
-        measures,
-        NTuple{N, Matrix}(M_ops),
-        NTuple{N, Matrix}(K_ops),
-        NTuple{N, Matrix}(G_ops),
-        NTuple{N, Matrix}(D_ops),
-        NTuple{N, Matrix}(A_ops)
-    )
+        spaces, measures, b_coeffs,
+        noth(), noth(), noth(), noth(), noth())
 end
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -240,10 +282,10 @@ Global mass matrix via full Kronecker product:
 No special structure - all matrices play same role.
 """
 function assemble_mass_tensor(ops::TensorProductSubdomainOperators{N}) where N
-    # Build from innermost (position 1) outward: kron(M_N, ..., kron(M_2, M_1))
-    M_global = ops.M_ops[1]
+    M = ops.M_ops  # trigger lazy assembly once; M is an NTuple
+    M_global = M[1]
     for k in 2:N
-        M_global = kronecker(ops.M_ops[k], M_global)
+        M_global = kronecker(M[k], M_global)
     end
     return collect(M_global)
 end
@@ -258,17 +300,17 @@ Each term places K^(k) at position k and M^(j) elsewhere.
 Total of N terms in the sum.
 """
 function assemble_stiffness_tensor(ops::TensorProductSubdomainOperators{N}) where N
-    # Correct total size: product of each subdomain's DOF count
-    n_total = prod(size(ops.M_ops[k], 1) for k in 1:N)
+    M = ops.M_ops  # trigger M assembly once
+    K = ops.K_ops  # trigger K assembly once
+
+    n_total = prod(size(M[k], 1) for k in 1:N)
     A_global = zeros(n_total, n_total)
 
     for k in 1:N
-        # Build term: kron(M_N, ..., kron(M_{k+1}, kron(K_k, kron(M_{k-1}, ..., M_1))))
-        # Start from innermost (position 1) outward — same convention as assemble_mass_tensor.
-        A_term = (k == 1) ? ops.K_ops[1] : ops.M_ops[1]
+        A_term = (k == 1) ? K[1] : M[1]
         for j in 2:N
-            factor = (j == k) ? ops.K_ops[j] : ops.M_ops[j]
-            A_term = kronecker(factor, A_term)   # prepend outer: kron(outer, inner)
+            factor = (j == k) ? K[j] : M[j]
+            A_term = kronecker(factor, A_term)
         end
         A_global += collect(A_term)
     end
@@ -290,14 +332,14 @@ Physical meaning: Weak gradient operator ∇ on tensor product domain,
 with output dimension = N × (standard domain dimension).
 """
 function assemble_gradient_tensor(ops::TensorProductSubdomainOperators{N}) where N
+    M = ops.M_ops  # trigger M assembly once
+    G = ops.G_ops  # trigger G assembly once
     blocks = Vector{Matrix}(undef, N)
 
     for k in 1:N
-        # Build block k: kron(M_N, ..., kron(G_k, ..., kron(M_2, M_1|G_1)))
-        # Start from innermost (position 1) outward.
-        G_block = (k == 1) ? ops.G_ops[1] : ops.M_ops[1]
+        G_block = (k == 1) ? G[1] : M[1]
         for j in 2:N
-            factor = (j == k) ? ops.G_ops[j] : ops.M_ops[j]
+            factor = (j == k) ? G[j] : M[j]
             G_block = kronecker(factor, G_block)
         end
         blocks[k] = collect(G_block)
@@ -349,28 +391,30 @@ Returns: Sparse matrix of size (n_dofs, n_dofs)
 """
 function assemble_curl_curl_tensor(ops::TensorProductSubdomainOperators{N};
                                     curl_op=nothing) where N
-    n_total = prod(size(ops.M_ops[k], 1) for k in 1:N)
+    M = ops.M_ops  # trigger M assembly once
+    D = ops.D_ops  # trigger D assembly once
+
+    n_total = prod(size(M[k], 1) for k in 1:N)
     C_global = zeros(n_total, n_total)
 
     for k in 1:N
         for l in 1:N
             l == k && continue
 
-            # Build outer factor ⊗_{j≠k,l} M^(j) from innermost to outermost.
             other_positions = [j for j in 1:N if j != k && j != l]
             if isempty(other_positions)
-                outer_factor = nothing   # N=2: no outer mass factor
+                outer_factor = nothing
             else
-                outer_factor = ops.M_ops[other_positions[1]]   # innermost
+                outer_factor = M[other_positions[1]]
                 for j in other_positions[2:end]
-                    outer_factor = kronecker(ops.M_ops[j], outer_factor)   # prepend outer
+                    outer_factor = kronecker(M[j], outer_factor)
                 end
             end
 
-            C_matrix = (curl_op === nothing) ? I(size(ops.D_ops[k], 1)) : curl_op
+            C_matrix = (curl_op === nothing) ? I(size(D[k], 1)) : curl_op
 
-            inner_factor = (transpose(C_matrix) * transpose(ops.D_ops[k]) * ops.D_ops[l]
-                            - transpose(ops.D_ops[l]) * ops.D_ops[k])
+            inner_factor = (transpose(C_matrix) * transpose(D[k]) * D[l]
+                            - transpose(D[l]) * D[k])
 
             pair_term = (outer_factor === nothing) ? inner_factor :
                         collect(kronecker(outer_factor, inner_factor))
@@ -416,14 +460,16 @@ function assemble_advection_tensor(ops::TensorProductSubdomainOperators{N},
                                    b_coeffs::NTuple) where N
     @assert length(b_coeffs) == N "Velocity field must have N components"
 
-    n_total = prod(size(ops.M_ops[k], 1) for k in 1:N)
+    M = ops.M_ops  # trigger M assembly once
+    A = ops.A_ops  # trigger A assembly once
+
+    n_total = prod(size(M[k], 1) for k in 1:N)
     T_global = zeros(n_total, n_total)
 
     for k in 1:N
-        # Build term from innermost (position 1) outward.
-        T_term = (k == 1) ? ops.A_ops[1] : ops.M_ops[1]
+        T_term = (k == 1) ? A[1] : M[1]
         for j in 2:N
-            factor = (j == k) ? ops.A_ops[j] : ops.M_ops[j]
+            factor = (j == k) ? A[j] : M[j]
             T_term = kronecker(factor, T_term)
         end
         T_global += b_coeffs[k] * collect(T_term)
@@ -601,4 +647,6 @@ function extract_advection_matrix(
     )
     return get_matrix(op_advec)
 end
+
+# assemble_weak_form has moved to TensorProductOperator.jl (Stage 4 translation layer)
 

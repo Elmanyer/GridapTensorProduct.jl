@@ -164,8 +164,6 @@ export KroneckerAssembler
 export FallbackAssembler
 include("TensorProductAssemblers.jl")
 
-include("TensorProductAssembly.jl")
-
 export TensorProductSubdomainOperators
 export TensorProductGlobalOperator
 export assemble_subdomain_operators
@@ -175,13 +173,25 @@ export assemble_gradient_tensor
 export assemble_divergence_tensor
 export assemble_curl_curl_tensor
 export assemble_advection_tensor
+export extract_gradient_matrix
+export extract_derivative_matrix
+export extract_advection_matrix
 include("TensorProductFEMOperators.jl")
 
+export TensorProductSeparableTerm
+export TensorProductWeakForm
+export num_terms, get_terms
+export assemble_weak_form
+export normalize_to_list, assemble_subdomain_matrix, classify_term
+export translate_bilinear_form
 export TensorProductOperator
 export get_global_matrix
 export get_subdomain_operators
 export get_operator_type
+export TensorProductAffineOperator
 include("TensorProductOperator.jl")
+
+include("TensorProductAssembly.jl")
 
 
 end # module GridapTensorProduct
