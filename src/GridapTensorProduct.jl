@@ -1,132 +1,58 @@
 """
     GridapTensorProduct
 
-Extension to Gridap.jl enabling efficient solution of PDEs on tensor-product domains.
+Extension to Gridap.jl enabling efficient solution of PDEs on tensor-product domains
+via Kronecker product decomposition.
 
 ## Pipeline Architecture
 
-The library organizes tensor product FEM into **5 stages**, enabling subdomains to be treated
-independently until assembly:
-
-### Stage 1: Measures (TensorProductMeasure)
-Bundle quadrature rules and integration measures for each subdomain.
-```julia
-dΩ1 = Measure(trian1, 2)
-dΩ2 = Measure(trian2, 2)
-dΩ_tp = dΩ1 ⊗ dΩ2  # Tensor product measure
+```
+Stage 1  TensorProductMeasure        — bundle N subdomain measures; ⊗ operator
+Stage 2  TensorProductFESpace        — bundle N subdomain FE spaces + DOF mapping
+Stage 3  TensorProductGeometry       — lazy triangulation and cell-field wrappers
+Stage 4  TensorProductFEMOperators   — lazy subdomain operators; six Kronecker assemblers
+Stage 5  TensorProductOperator       — explicit-label weak form → global system
 ```
 
-### Stage 2: FE Spaces (TensorProductFESpace)
-Bundle FE basis functions and DOF structure for each subdomain.
-```julia
-V1 = TestFESpace(Ω1, reffe)
-V2 = TestFESpace(Ω2, reffe)
-V_tp = TensorProductFESpace(V1, V2)
-```
+## Quick-start (2D Poisson)
 
-### Stage 3: Geometry (TensorProductGeometry)
-Lazy wrappers for triangulations and cell fields (used only when assembling weak forms).
-```julia
-trian_tp = TensorProductTriangulation(get_triangulation(V1), get_triangulation(V2))
-```
-
-### Stage 4: Operator Translation (TensorProductOperator, TensorProductFEMOperators)
-Translate global weak-form operators into Kronecker product decompositions.
-- Six operator types supported: Mass, Stiffness, Gradient, Divergence, Curl-Curl, Advection
-```julia
-op_stiff = TensorProductOperator(:stiffness, (V1, V2), (dΩ1, dΩ2))
-A = get_global_matrix(op_stiff)  # Triggers Kronecker assembly
-```
-
-### Stage 5: Assembly & Solving (TensorProductAssembly, TensorProductAssemblers)
-Assemble via Kronecker relations and solve using Gridap solvers.
-```julia
-a(u, v) = ∫(∇(u) ⋅ ∇(v)) * dΩ_tp
-l(v) = ∫(v) * dΩ_tp
-A, b = assemble_tensor_affine_operator(a, l, V_tp, V_tp)
-u = A \\ b
-```
-
-## Key Design Principles
-- **Subdomain Independence:** Each subdomain is a primary computational unit
-- **Lazy Instantiation:** Tensor operations only instantiated when needed for assembly
-- **Kronecker Factorization:** Global operators decomposed as sums/products of subdomain matrices
-  - Mass: M = M₁ ⊗ M₂ ⊗ ... ⊗ Mₙ
-  - Stiffness: A = ΣK₁⊗M₂⊗... + M₁⊗K₂⊗... + ...
-  - Gradient: G = ⊕[M₁⊗G₂⊗...], [G₁⊗M₂⊗...], ...
-  - etc.
-
-## Usage Example (2D Poisson)
 ```julia
 using Gridap, GridapTensorProduct
 
-# Stage 1-3: Set up subdomains (work independently)
 model_x = CartesianDiscreteModel((0,1), 10)
 model_y = CartesianDiscreteModel((0,1), 10)
-Vx = TestFESpace(Interior(model_x), ReferenceFE(lagrangian, Float64, 2))
-Vy = TestFESpace(Interior(model_y), ReferenceFE(lagrangian, Float64, 2))
+Vx = TestFESpace(Interior(model_x), ReferenceFE(lagrangian, Float64, 1);
+                  conformity=:H1, dirichlet_tags="boundary")
+Vy = TestFESpace(Interior(model_y), ReferenceFE(lagrangian, Float64, 1);
+                  conformity=:H1, dirichlet_tags="boundary")
+Ux = TrialFESpace(Vx, 0.0); Uy = TrialFESpace(Vy, 0.0)
+
 dΩx = Measure(Interior(model_x), 2)
 dΩy = Measure(Interior(model_y), 2)
+dΩ_tp = dΩx ⊗ dΩy
 
-# Stage 2: Create tensor space
 V_tp = TensorProductFESpace(Vx, Vy)
+U_tp = TensorProductFESpace(Ux, Uy)
 
-# Stage 4: Define weak form and assemble
-a(u, v) = ∫(∇(u) ⋅ ∇(v)) * (dΩx ⊗ dΩy)
-l(v) = ∫(1.0 * v) * (dΩx ⊗ dΩy)
+lhs = [TensorProductDomainContribution(:stiffness, dΩ_tp)]
+rhs = [TensorProductLinearContribution(dΩ_tp)]
+op  = TensorProductAffineOperator(TensorProductWeakForm(lhs, rhs), V_tp, U_tp)
 
-# Stage 5: Assemble and solve
-A, b = assemble_tensor_affine_operator(a, l, V_tp, V_tp)
+A = get_matrix(op)
+b = get_vector(op)
 u = A \\ b
 ```
 
-## Kronecker Product Lazy Evaluation
+## Kronecker Decompositions
 
-This library uses **Kronecker.jl** for efficient Kronecker product assembly with lazy evaluation.
-
-### Why Lazy Evaluation?
-
-Traditional approaches compute Kronecker products eagerly, materialize the full global matrix:
-
-```
-Example: 2D Poisson with 100×100 1D mesh
-┌─────────────────────────────────────────────────────────────────┐
-│ LinearAlgebra.kron (eager):                                     │
-│  K1 (10K×10K) ⊗ M2 (10K×10K) → 100M×100M DENSE matrix          │
-│  Memory: ~40 GB per term × N terms → Infeasible              │
-│                                                                  │
-│ Kronecker.jl (lazy):                                            │
-│  KroneckerProduct(K1, M2) → Lightweight struct (~1 KB)         │
-│  Memory: ~1 KB per term + efficiency on matrix-vector ops      │
-│  Scales to 3D/4D problems naturally                            │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Solver Integration
-
-For **iterative solvers** (CG, GMRES, etc.), lazy Kronecker products work seamlessly:
-- Matrix-vector products `y = A*x` computed implicitly without materializing `A`
-- Memory footprint stays small throughout solving
-- Solver framework automatically handles the KroneckerProduct type
-
-For **direct solvers** (LU, QR), convert to sparse when needed:
-```julia
-using LinearAlgebra: sparse
-A_sparse = sparse(A)  # Explicit conversion only when necessary
-u = lu(A_sparse) \\ b
-```
-
-### Performance Benefits
-
-| Problem Size    | LinearAlgebra.kron | Kronecker.jl  | Scaling |
-|-----------------|-------------------|--------------|---------|
-| 2D small        | ~1 GB              | ~1 KB        | 1M× |
-| 2D medium       | OOM (>100 GB)      | ~1 KB        | Enables |
-| 3D small        | OOM                | ~1 KB        | Enables |
-
-## Validation
-All implementations validated against standard Gridap reference solutions.
-Tested on 2D (Poisson, advection, curl), 3D tensor products, and heterogeneous problems.
+| Operator     | Global formula                                      |
+|:-------------|:----------------------------------------------------|
+| Mass         | `M = M⁽¹⁾ ⊗ M⁽²⁾ ⊗ … ⊗ M⁽ᴺ⁾`                    |
+| Stiffness    | `A = Σₖ M⁽¹⁾ ⊗ … ⊗ K⁽ᵏ⁾ ⊗ … ⊗ M⁽ᴺ⁾`             |
+| Gradient     | `G = ⊕ₖ M⁽¹⁾ ⊗ … ⊗ G⁽ᵏ⁾ ⊗ … ⊗ M⁽ᴺ⁾`             |
+| Divergence   | `B = Gᵀ`                                           |
+| Curl-curl    | `C = Σₖ Σₗ≠ₖ (⊗ⱼ≠ₖ,ₗ M⁽ʲ⁾) ⊗ (Cᵀ Dₖᵀ Dₗ − …)`  |
+| Advection    | `T = Σₖ bₖ · M⁽¹⁾ ⊗ … ⊗ A⁽ᵏ⁾ ⊗ … ⊗ M⁽ᴺ⁾`       |
 """
 module GridapTensorProduct
 
@@ -148,24 +74,34 @@ using Gridap.TensorValues
 
 import FillArrays: Fill
 
+# ── Stage 1: Measures ───────────────────────────────────────────────────────
 export TensorProductMeasure, ⊗
 include("TensorProductMeasures.jl")
 
+# ── Stage 2 integration types: integrand hook + explicit-label contributions ──
+export TensorProductIntegrand
+export TensorProductDomainContribution
+export TensorProductLinearContribution
 include("TensorProductIntegration.jl")
 
+# ── Stage 3: Geometry ───────────────────────────────────────────────────────
 export TensorProductTriangulation, TensorProductCellField
 include("TensorProductGeometry.jl")
 
+# ── Stage 2: FE Spaces ─────────────────────────────────────────────────────
 export TensorProductFESpace
 include("TensorProductFESpaces.jl")
 
-export TensorProductAssembler
-export KroneckerAssembler
-export FallbackAssembler
+# ── Assembler utilities (low-level) ─────────────────────────────────────────
+export TensorProductAssembler, KroneckerAssembler, FallbackAssembler
+export tensor_tuple_to_linear_index, linear_index_to_tensor_tuple
+export tensor_kron, tensor_kron_vector
+export apply_tensor_operator
+export assemble_tensor_rhs, assemble_tensor_operator
 include("TensorProductAssemblers.jl")
 
+# ── Stage 4: Subdomain operators + six Kronecker assemblers ─────────────────
 export TensorProductSubdomainOperators
-export TensorProductGlobalOperator
 export assemble_subdomain_operators
 export assemble_mass_tensor
 export assemble_stiffness_tensor
@@ -178,20 +114,16 @@ export extract_derivative_matrix
 export extract_advection_matrix
 include("TensorProductFEMOperators.jl")
 
-export TensorProductSeparableTerm
-export TensorProductWeakForm
-export num_terms, get_terms
-export assemble_weak_form
-export normalize_to_list, assemble_subdomain_matrix, classify_term
-export translate_bilinear_form
+# ── Stage 5: Explicit-label weak form + operator hierarchy ──────────────────
+export TensorProductWeakForm, num_lhs_terms, num_rhs_terms
 export TensorProductOperator
-export get_global_matrix
-export get_subdomain_operators
-export get_operator_type
 export TensorProductAffineOperator
+export get_matrix, get_vector
 include("TensorProductOperator.jl")
 
+# ── Functional convenience API ───────────────────────────────────────────────
+export assemble_tensor_affine_operator
+export assemble_tensor_system
 include("TensorProductAssembly.jl")
-
 
 end # module GridapTensorProduct

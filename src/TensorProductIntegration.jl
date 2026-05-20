@@ -1,82 +1,59 @@
 """
     TensorProductIntegration
 
-Integration support for TensorProductMeasure objects in the Gridap weak form assembly pipeline.
+Integration hooks and contribution types for tensor-product weak forms.
 
-# Purpose
+# Overview
 
-This module extends Gridap's integrate() and related functions to handle tensor-product measures,
-allowing users to write:
+This module provides:
 
-    a(u,v) = ∫(∇(u)⋅∇(v)) * dΩ_tp
+1. `TensorProductIntegrand` — the marker type produced by `∫(expr) * dΩ_tp`.
+   Carries the integrand object and the `TensorProductMeasure`; not evaluated directly.
 
-where dΩ_tp = dΩ1 ⊗ dΩ2 ⊗ ... ⊗ dΩn.
+2. `TensorProductDomainContribution` — an explicit-label recipe for a single
+   **bilinear** form term.  The user annotates each term with its operator type
+   (`:stiffness`, `:mass`, etc.) and the tensor-product measure.  The assembler
+   uses the label to dispatch to the correct Kronecker formula without any
+   heuristic classification.
 
-**This is Stage 5** of the tensor product pipeline (integration foundation).
+3. `TensorProductLinearContribution` — recipe for a single **linear** (RHS)
+   form term.  Stores the tensor-product measure and optional per-subdomain
+   linear forms.
 
-# Design Approach (Pragmatic)
+# Typical usage
 
-Rather than implementing full quaternary quadrature-based integration, this module uses a
-**two-pronged approach:**
+```julia
+dΩ_tp = dΩx ⊗ dΩy
 
-1. **Current (Stage 3+):** Weak-form route via TensorProductFEMOperators
-   - User defines weak form (e.g., `a(u,v) = ∫(∇(u)⋅∇(v)) * dΩ_tp`)
-   - TensorProductAssembly detects operator type
-   - Routes to TensorProductFEMOperators for Kronecker assembly
-   - No need for tensor quadrature evaluation
+# Poisson LHS:
+dc = TensorProductDomainContribution(:stiffness, dΩ_tp)
 
-2. **Future ([PHASE 4+]):** Direct quaternary integration for general integrands
-   - Implement cell quadrature iteration over tensor cells
-   - Support arbitrary integrands (research/testing only)
-   - More complex, less common use case
+# Helmholtz LHS (K + k²M):
+lhs = [
+    TensorProductDomainContribution(:stiffness, dΩ_tp),
+    TensorProductDomainContribution(:mass, dΩ_tp; coefficient = k^2)
+]
 
-# Why Pragmatic?
+# Unit RHS:
+lc = TensorProductLinearContribution(dΩ_tp)
 
-For 95% of use cases (standard PDE operators: Poisson, advection-diffusion, etc.), weak-form
-decomposition + Kronecker assembly is both more efficient and more natural. Full quaternary
-integration is deferred until there's a compelling use case.
-
-# Current Framework
-
-The infrastructure is in place (TensorProductDomainContribution, multiply dispatch), but
-integration evaluation returns descriptive errors with phase labels. This makes it easy to
-add full evaluation later without breaking existing code.
-
-# Architecture
-
-1. When ∫(expr) * dΩ_tp is evaluated, create an Integrand with TensorProductMeasure
-2. Later, when integrate() is called on this, dispatch to tensor-aware integration
-3. Return a DomainContribution that accounts for the tensor-product cell structure
+# Custom separable RHS:
+lc = TensorProductLinearContribution(dΩ_tp;
+        rhs_forms = (v -> ∫(f_x * v) * dΩx, v -> ∫(f_y * v) * dΩy))
+```
 """
 
 
-# ===========================
-# Integrand × Measure multiplication (Gridap hook point)
-# ===========================
-
-"""
-    *(integrand::Integrand, m::TensorProductMeasure)
-
-Create a domain contribution representing the integration of `integrand` over the tensor-product measure.
-
-This is the entry point that Gridap calls when users write `∫(expr) * measure`.
-For TensorProductMeasure, we create a special DomainContribution that handles tensor-product cell structure.
-"""
-
-function Base.:*(integrand::Gridap.CellData.Integrand, m::TensorProductMeasure)
-    return TensorProductIntegrand(integrand.object, m)
-end
-
-# ===========================
+# ═══════════════════════════════════════════════════════════════════════════
 # TensorProductIntegrand — marker produced by ∫(expr) * dΩ_tp
-# ===========================
+# ═══════════════════════════════════════════════════════════════════════════
 
 """
     struct TensorProductIntegrand
 
-Marker produced when `∫(expr) * dΩ_tp` is evaluated on a TensorProductMeasure.
-Carries the integrand object and the tensor-product measure; actual assembly is
-deferred to `TensorProductAffineOperator` or `assemble_tensor_affine_operator`.
+Marker produced when `∫(expr) * dΩ_tp` is evaluated on a `TensorProductMeasure`.
+Carries the integrand object and the tensor-product measure.  Actual assembly is
+deferred to `TensorProductAffineOperator`.
 """
 struct TensorProductIntegrand
     object::Any
@@ -85,103 +62,176 @@ end
 
 export TensorProductIntegrand
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TensorProductFormContribution — list of terms captured from a 2-arg form
-# ═══════════════════════════════════════════════════════════════════════════
-
 """
-    struct TensorProductFormContribution
+    *(integrand::Integrand, m::TensorProductMeasure) -> TensorProductIntegrand
 
-A list of individually-captured `TensorProductIntegrand` terms produced when
-`+` is called between `TensorProductIntegrand` objects. This ensures that a
-multi-term weak form written as:
-
-    a(u, v) = ∫(∇u⋅∇v)*dΩ_tp + ∫(u*v)*dΩ_tp
-
-keeps the two terms *separate* rather than merging them (as Gridap's
-`DomainContribution +` would do). Each term can then be individually
-classified and assembled via the Kronecker heuristic in `translate_bilinear_form`.
+Gridap hook: intercepts `∫(expr) * dΩ_tp` and wraps the result.
 """
-struct TensorProductFormContribution
-    terms::Vector{TensorProductIntegrand}
+function Base.:*(integrand::Gridap.CellData.Integrand, m::TensorProductMeasure)
+    return TensorProductIntegrand(integrand.object, m)
 end
 
-export TensorProductFormContribution
 
-Base.:+(t1::TensorProductIntegrand, t2::TensorProductIntegrand) =
-    TensorProductFormContribution([t1, t2])
-Base.:+(fc::TensorProductFormContribution, t::TensorProductIntegrand) =
-    TensorProductFormContribution([fc.terms..., t])
-Base.:+(t::TensorProductIntegrand, fc::TensorProductFormContribution) =
-    TensorProductFormContribution([t, fc.terms...])
-Base.:+(fc1::TensorProductFormContribution, fc2::TensorProductFormContribution) =
-    TensorProductFormContribution([fc1.terms..., fc2.terms...])
-
-# ===========================
-# TensorProductDomainContribution — per-subdomain contribution container
-# ===========================
+# ═══════════════════════════════════════════════════════════════════════════
+# TensorProductDomainContribution — labeled bilinear form recipe
+# ═══════════════════════════════════════════════════════════════════════════
 
 """
     struct TensorProductDomainContribution
 
-Per-subdomain contribution container for tensor product weak forms.
-Mirrors Gridap's `DomainContribution` (which is an `OrderedDict{Triangulation,AbstractArray}`)
-but stores one Gridap `DomainContribution` per subdomain.
+Explicit-label recipe for a single **bilinear** form term in a tensor-product
+weak form.
+
+The user provides the operator type `label` and the `TensorProductMeasure` that
+carries all per-subdomain `Measure` objects.  The assembler uses the label to
+dispatch to the correct Kronecker formula without any heuristic classification.
+
+# Fields
+- `label::Symbol`  — operator type: `:mass`, `:stiffness`, `:gradient`,
+  `:divergence`, `:curl_curl`, or `:advection`
+- `measure::TensorProductMeasure`  — bundle of per-subdomain measures
+- `coefficient::Float64`  — scalar multiplier applied at assembly (default 1.0)
+- `b_coeffs::Union{Nothing, NTuple}`  — velocity components `(b₁, …, bₙ)` required
+  when `label == :advection`; `nothing` for all other labels
+
+# Which subdomain operators are needed per label
+
+| label        | subdomain ops assembled |
+|:-------------|:------------------------|
+| `:mass`      | M_k                     |
+| `:stiffness` | M_k, K_k                |
+| `:gradient`  | M_k, G_k                |
+| `:divergence`| M_k, G_k                |
+| `:curl_curl` | M_k, D_k                |
+| `:advection` | M_k, A_k                |
+
+The lazy caching in `TensorProductSubdomainOperators` ensures each subdomain
+matrix is assembled at most once, even when multiple contributions share the
+same label.
+
+# Constructors
+
+```julia
+# From a label and measure directly:
+TensorProductDomainContribution(:stiffness, dΩ_tp)
+TensorProductDomainContribution(:mass, dΩ_tp; coefficient = k^2)
+TensorProductDomainContribution(:advection, dΩ_tp; b_coeffs = (2.0, 1.5))
+
+# From a TensorProductIntegrand (extracts measure automatically):
+intg = ∫(∇(u)⋅∇(v)) * dΩ_tp   # TensorProductIntegrand
+TensorProductDomainContribution(intg, :stiffness)
+TensorProductDomainContribution(intg, :mass; coefficient = k^2)
+```
 """
-mutable struct TensorProductDomainContribution
-    contributions::Vector{DomainContribution}
+struct TensorProductDomainContribution
+    label::Symbol
     measure::TensorProductMeasure
-    operator_type::Symbol
+    coefficient::Float64
+    b_coeffs::Union{Nothing, NTuple}
 end
 
-function TensorProductDomainContribution(measure::TensorProductMeasure;
-                                          op_type::Symbol = :unknown)
-    N = num_subdomains(measure)
-    TensorProductDomainContribution(
-        Vector{DomainContribution}(undef, N), measure, op_type)
+const _VALID_BILINEAR_LABELS = (:mass, :stiffness, :gradient, :divergence, :curl_curl, :advection)
+
+function TensorProductDomainContribution(
+    label::Symbol,
+    measure::TensorProductMeasure;
+    coefficient::Real = 1.0,
+    b_coeffs::Union{Nothing, NTuple} = nothing
+)
+    label ∈ _VALID_BILINEAR_LABELS ||
+        error("TensorProductDomainContribution: unknown label `$label`. " *
+              "Must be one of $_VALID_BILINEAR_LABELS.")
+    label === :advection && b_coeffs === nothing &&
+        error("TensorProductDomainContribution: label=:advection requires `b_coeffs` keyword.")
+    TensorProductDomainContribution(label, measure, Float64(coefficient), b_coeffs)
 end
 
-get_operator_type(c::TensorProductDomainContribution) = c.operator_type
-get_subdomain_contribution(c::TensorProductDomainContribution, k::Int) = c.contributions[k]
-num_subdomains(c::TensorProductDomainContribution) = length(c.contributions)
-
-function add_subdomain_contribution!(c::TensorProductDomainContribution,
-                                      k::Int, dc::DomainContribution)
-    c.contributions[k] = dc
-end
-
-function Base.:+(c1::TensorProductDomainContribution, c2::TensorProductDomainContribution)
-    @assert num_subdomains(c1) == num_subdomains(c2)
-    N = num_subdomains(c1)
-    combined = [c1.contributions[k] + c2.contributions[k] for k in 1:N]
-    TensorProductDomainContribution(combined, c1.measure, c1.operator_type)
+function TensorProductDomainContribution(
+    intg::TensorProductIntegrand,
+    label::Symbol;
+    coefficient::Real = 1.0,
+    b_coeffs::Union{Nothing, NTuple} = nothing
+)
+    TensorProductDomainContribution(label, intg.measure;
+                                     coefficient = coefficient,
+                                     b_coeffs    = b_coeffs)
 end
 
 export TensorProductDomainContribution
 
-# ===========================
-# Integration dispatch
-# ===========================
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TensorProductLinearContribution — labeled linear form (RHS) recipe
+# ═══════════════════════════════════════════════════════════════════════════
 
 """
-    integrate(contrib::TensorProductIntegrand) -> (not implemented)
+    struct TensorProductLinearContribution
 
-Direct integration of a `TensorProductIntegrand` is not supported. Use the high-level
-assembly API instead:
+Recipe for a single **linear** (right-hand side) form term in a tensor-product
+weak form.
 
-    op = TensorProductAffineOperator(a, l, U_tp, V_tp; op_type=:stiffness)
-    A  = get_matrix(op)
-    b  = get_vector(op)
+# Fields
+- `measure::TensorProductMeasure`  — bundle of per-subdomain measures
+- `rhs_forms::Union{Nothing, Tuple}`  — per-subdomain linear forms
+  `(v -> ∫(f₁*v)*dΩ₁, v -> ∫(f₂*v)*dΩ₂, …)`.  When `nothing`, each subdomain
+  uses a unit load `∫(1*v)*dΩₖ`.
+- `coefficient::Float64`  — scalar multiplier (default 1.0)
 
-or for low-level access:
+# Constructors
 
-    A, b = assemble_tensor_affine_operator(a, l, U_tp, V_tp; op_type=:stiffness)
+```julia
+# Unit load on every subdomain:
+TensorProductLinearContribution(dΩ_tp)
+
+# Custom separable load:
+TensorProductLinearContribution(dΩ_tp;
+    rhs_forms = (v -> ∫(f_x * v) * dΩx, v -> ∫(f_y * v) * dΩy))
+
+# Scaled unit load:
+TensorProductLinearContribution(dΩ_tp; coefficient = 2.0)
+```
+"""
+struct TensorProductLinearContribution
+    measure::TensorProductMeasure
+    rhs_forms::Union{Nothing, Tuple}
+    coefficient::Float64
+end
+
+function TensorProductLinearContribution(
+    measure::TensorProductMeasure;
+    rhs_forms::Union{Nothing, Tuple} = nothing,
+    coefficient::Real = 1.0
+)
+    TensorProductLinearContribution(measure, rhs_forms, Float64(coefficient))
+end
+
+export TensorProductLinearContribution
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Direct integration — error stub
+# ═══════════════════════════════════════════════════════════════════════════
+
+"""
+    Gridap.CellData.integrate(::TensorProductIntegrand)
+
+Direct `integrate()` on a `TensorProductIntegrand` is not supported.
+Use the high-level assembly API:
+
+    lhs = [TensorProductDomainContribution(:stiffness, dΩ_tp)]
+    rhs = [TensorProductLinearContribution(dΩ_tp)]
+    op  = TensorProductAffineOperator(TensorProductWeakForm(lhs, rhs), V_tp, U_tp)
+    A   = get_matrix(op)
+    b   = get_vector(op)
 """
 function Gridap.CellData.integrate(_contrib::TensorProductIntegrand)
     error("""
     Direct integrate() on TensorProductIntegrand is not supported.
-    Use TensorProductAffineOperator(a, l, U_tp, V_tp; op_type=:stiffness) instead,
-    or assemble_tensor_affine_operator(a, l, U_tp, V_tp; op_type=:stiffness).
+    Use TensorProductAffineOperator with TensorProductDomainContribution instead:
+
+        lhs = [TensorProductDomainContribution(:stiffness, dΩ_tp)]
+        rhs = [TensorProductLinearContribution(dΩ_tp)]
+        op  = TensorProductAffineOperator(TensorProductWeakForm(lhs, rhs), V_tp, U_tp)
+        A, b = get_matrix(op), get_vector(op)
     """)
 end
-

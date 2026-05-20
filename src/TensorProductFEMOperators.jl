@@ -482,23 +482,6 @@ end
 # PART 3: High-Level API - Form Translation to Operators
 # ═══════════════════════════════════════════════════════════════════════════
 
-"""
-    TensorProductGlobalOperator
-
-High-level representation of a bilinear form on tensor domain,
-with automatic translation to Kronecker structure.
-
-Supports:
-  - Forms involving mass, stiffness, gradient, divergence
-  - Separable advection
-  - Automatic detection of operator type
-"""
-struct TensorProductGlobalOperator
-    operator_type::Symbol  # :mass, :stiffness, :gradient, :divergence, :curl, :advection
-    matrix::Matrix
-    subdomain_ops::TensorProductSubdomainOperators
-end
-
 
 """
 Helper functions to extract fundamental subdomain operator matrices from Gridap FE spaces.
@@ -509,11 +492,6 @@ Implements extraction of:
 3. A^(k): Advection matrices for separable velocity fields
 """
 
-# Import necessary Gridap functionality
-import Gridap.FESpaces: FESpace, TrialFESpace, TestFESpace
-import Gridap.FESpaces: get_matrix, AffineFEOperator
-import Gridap: ∫
-import Gridap.Fields: ∇
 import LinearAlgebra: mul!
 
 export extract_gradient_matrix
